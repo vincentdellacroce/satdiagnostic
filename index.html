@@ -136,8 +136,8 @@
   .verdict .ca{font-family:var(--mono);font-weight:600}
   .verdict a{color:inherit;text-decoration:underline;text-underline-offset:2px}
 
-  .qnav{display:flex;justify-content:space-between;gap:12px;margin-top:24px}
-  .qnav .right{display:flex;gap:10px}
+  .qnav{display:flex;justify-content:space-between;gap:12px;margin-top:24px;flex-wrap:wrap}
+  .qnav .left,.qnav .right{display:flex;gap:10px}
 
   /* ---------- Results / error map ---------- */
   .results{display:none}
@@ -218,7 +218,10 @@
     <div class="verdict" id="verdict"></div>
 
     <div class="qnav">
-      <button class="btn" id="prevBtn">← Previous</button>
+      <div class="left">
+        <button class="btn" id="prevBtn">← Previous</button>
+        <button class="btn danger" id="restartDomainBtn" title="Clear this domain and start over">↺ Start over</button>
+      </div>
       <div class="right">
         <button class="btn ghost" id="skipBtn">Skip</button>
         <button class="btn primary" id="nextBtn">Next →</button>
@@ -263,9 +266,13 @@
   DATA.forEach((q,i)=>{ q._i=i; (byDomain[q.domShort] ||= []).push(q); });
 
   // ----- state (answers) -----
+  const SUB_KEY = "sat_hard_diag_submitted_v1";
   let answers = load(); // {qid: {given, correct(bool)}}
+  let submitted = loadSub(); // {domShort: true} -> answers revealed for that domain
   function load(){ try{ return JSON.parse(localStorage.getItem(LS_KEY))||{}; }catch(e){ return {}; } }
   function save(){ try{ localStorage.setItem(LS_KEY, JSON.stringify(answers)); }catch(e){} }
+  function loadSub(){ try{ return JSON.parse(localStorage.getItem(SUB_KEY))||{}; }catch(e){ return {}; } }
+  function saveSub(){ try{ localStorage.setItem(SUB_KEY, JSON.stringify(submitted)); }catch(e){} }
 
   // ----- helpers -----
   const $ = s=>document.querySelector(s);
@@ -298,10 +305,11 @@
       const ansd = qs.filter(q=>answers[q.id]);
       const correct = ansd.filter(q=>answers[q.id].correct).length;
       totalAns += ansd.length;
+      const isSub = !!submitted[dom];
       const card = el("button","card");
       card.setAttribute("aria-label",dom+" quiz");
       let cls="", status="Start";
-      if(ansd.length===qs.length && qs.length){ cls="done"; status="Complete"; }
+      if(isSub){ cls="done"; status="Submitted"; }
       else if(ansd.length>0){ cls="partial"; status="In progress"; }
       if(cls) card.classList.add(cls);
       const pct = ansd.length? Math.round(100*correct/ansd.length):0;
@@ -314,14 +322,14 @@
         <div class="bar"><span style="width:${progPct}%"></span></div>
         <div class="scoreline">
           <span>${ansd.length}/${qs.length} answered</span>
-          <span>${ansd.length? `<b>${pct}%</b> correct`:"&nbsp;"}</span>
+          <span>${isSub? `<b>${pct}%</b> correct` : (ansd.length? "answers hidden until submit" : "&nbsp;")}</span>
         </div>`;
       card.addEventListener("click",()=>openQuiz(dom));
       grid.appendChild(card);
     });
     // masthead progress
     $("#mProgress").innerHTML = totalAns? `<b>${totalAns}</b>/112 answered` : "not started";
-    $("#viewMapBtn").disabled = totalAns===0;
+    $("#viewMapBtn").disabled = Object.keys(submitted).length===0;
   }
 
   // ===== QUIZ =====
@@ -352,17 +360,20 @@
     // stage
     $("#qStage").innerHTML = `<img alt="SAT question ${q.id}" src="data:image/png;base64,${q.img}">`;
     // answer area
-    buildAnswerArea(q);
-    // verdict
+    const reviewing = !!submitted[cur.dom];
+    buildAnswerArea(q, reviewing);
+    // verdict — only shown once the whole domain has been submitted
     const rec = answers[q.id];
     const v=$("#verdict"); v.className="verdict";
-    if(rec){ showVerdict(q, rec.correct); } else { v.innerHTML=""; }
+    if(reviewing){ showVerdict(q, !!(rec && rec.correct)); } else { v.innerHTML=""; }
     // nav buttons
     $("#prevBtn").disabled = cur.idx===0;
-    $("#nextBtn").textContent = (cur.idx===n-1)? "Finish ✓" : "Next →";
+    $("#nextBtn").textContent = (cur.idx===n-1)
+      ? (reviewing? "Error map →" : "Submit domain ✓")
+      : "Next →";
   }
 
-  function buildAnswerArea(q){
+  function buildAnswerArea(q, reviewing){
     const area=$("#answerArea"); area.innerHTML="";
     const rec = answers[q.id];
     if(q.mc){
@@ -370,13 +381,17 @@
       ["A","B","C","D"].forEach(L=>{
         const b=el("button","choice");
         b.innerHTML=`<span class="lt">${L}</span><span>Choice ${L}</span>`;
-        if(rec){
+        if(reviewing){
+          // locked, graded view
           b.disabled=true;
           if(L===q.answer) b.classList.add("correct");
-          if(rec.given===L && !rec.correct) b.classList.add("wrong");
-          if(rec.given===L) b.classList.add("sel");
+          if(rec && rec.given===L && !rec.correct) b.classList.add("wrong");
+          if(rec && rec.given===L) b.classList.add("sel");
+        } else {
+          // selecting only — highlight choice, no reveal, freely changeable
+          if(rec && rec.given===L) b.classList.add("sel");
+          b.addEventListener("click",()=>selectMC(q,L));
         }
-        b.addEventListener("click",()=>submitMC(q,L));
         wrap.appendChild(b);
       });
       area.appendChild(wrap);
@@ -384,28 +399,31 @@
       const wrap=el("div","spr");
       const inp=el("input"); inp.type="text"; inp.placeholder="Type your answer"; inp.id="sprInput";
       inp.autocomplete="off"; inp.spellcheck=false;
-      if(rec){ inp.value=rec.given; inp.disabled=true; }
-      const btn=el("button","btn primary"); btn.textContent="Submit";
-      if(rec) btn.disabled=true;
-      const hint=el("span","hint"); hint.textContent="Decimals or fractions accepted (e.g. 3/4 or 0.75)";
-      btn.addEventListener("click",()=>submitSPR(q,inp.value));
-      inp.addEventListener("keydown",e=>{ if(e.key==="Enter"&&!inp.disabled) submitSPR(q,inp.value); });
-      wrap.appendChild(inp); wrap.appendChild(btn); wrap.appendChild(hint);
+      if(rec){ inp.value=rec.given; }
+      const hint=el("span","hint");
+      if(reviewing){
+        inp.disabled=true;
+        hint.textContent="Your submitted answer";
+        wrap.appendChild(inp); wrap.appendChild(hint);
+      } else {
+        hint.textContent="Decimals or fractions accepted (e.g. 3/4 or 0.75) · saved automatically";
+        // record as the student types; correctness is computed but kept hidden until submit
+        inp.addEventListener("input",()=>setSPR(q,inp.value));
+        wrap.appendChild(inp); wrap.appendChild(hint);
+      }
       area.appendChild(wrap);
-      if(!rec) setTimeout(()=>inp.focus(),40);
+      if(!reviewing) setTimeout(()=>inp.focus(),40);
     }
   }
 
-  function submitMC(q,L){
-    const correct = (L===q.answer);
-    answers[q.id]={given:L, correct}; save();
-    renderQ(); // re-render to lock + show verdict
-  }
-  function submitSPR(q,val){
-    if(!normSPR(val)) return;
-    const correct = sprMatch(val,q.answer);
-    answers[q.id]={given:val, correct}; save();
+  // record a selection during the quiz (no reveal); re-render only to move the highlight
+  function selectMC(q,L){
+    answers[q.id]={given:L, correct:(L===q.answer)}; save();
     renderQ();
+  }
+  function setSPR(q,val){
+    if(!normSPR(val)){ delete answers[q.id]; save(); return; }
+    answers[q.id]={given:val, correct:sprMatch(val,q.answer)}; save();
   }
 
   function showVerdict(q,correct){
@@ -429,13 +447,30 @@
     else finishDomain();
   });
   $("#exitQuiz").addEventListener("click",()=>{ renderHome(); show("home"); window.scrollTo(0,0); });
+  $("#restartDomainBtn").addEventListener("click",()=>{ if(cur.dom) restartDomain(cur.dom); });
 
-  function finishDomain(){ renderResults(); show("results"); window.scrollTo(0,0); }
+  function finishDomain(){
+    if(!submitted[cur.dom]){
+      const unanswered = cur.list.filter(q=>!answers[q.id]).length;
+      if(unanswered>0 && !confirm(`${unanswered} question${unanswered>1?"s":""} still unanswered. Submit this domain and reveal answers anyway?`)) return;
+      submitted[cur.dom]=true; saveSub();
+    }
+    renderResults(); show("results"); window.scrollTo(0,0);
+  }
+
+  // wipe one domain's answers + submitted state so it can be taken fresh
+  function restartDomain(dom){
+    if(!confirm(`Start "${dom}" over? This clears your answers for this domain only.`)) return;
+    (byDomain[dom]||[]).forEach(q=>{ delete answers[q.id]; });
+    delete submitted[dom];
+    save(); saveSub();
+    cur.idx=0; renderQ(); window.scrollTo(0,0);
+  }
 
   // ===== RESULTS / ERROR MAP =====
   function renderResults(){
-    // overall
-    const answered = DATA.filter(q=>answers[q.id]);
+    // overall — only count domains that have been submitted
+    const answered = DATA.filter(q=>submitted[q.domShort] && answers[q.id]);
     const correct = answered.filter(q=>answers[q.id].correct).length;
     const pct = answered.length? Math.round(100*correct/answered.length):0;
 
@@ -453,11 +488,12 @@
     DOMAIN_ORDER.forEach(dom=>{
       const qs=byDomain[dom]||[];
       const skills=[...new Set(qs.map(q=>q.skillShort))];
-      // only show domain if it has any answered
-      const anyAns = qs.some(q=>answers[q.id]);
+      // only reveal a domain's breakdown once it has been submitted
+      const isSub = !!submitted[dom];
       const h=el("h3"); h.textContent=dom;
-      if(!anyAns){ h.innerHTML += ` <span style="font-family:var(--mono);font-size:11px;color:var(--muted);font-weight:400;text-transform:uppercase;letter-spacing:.08em">— not started</span>`; }
+      if(!isSub){ h.innerHTML += ` <span style="font-family:var(--mono);font-size:11px;color:var(--muted);font-weight:400;text-transform:uppercase;letter-spacing:.08em">— not submitted</span>`; }
       map.appendChild(h);
+      if(!isSub) return;
       skills.forEach(sk=>{
         const sq=qs.filter(q=>q.skillShort===sk);
         const ans=sq.filter(q=>answers[q.id]);
@@ -480,7 +516,7 @@
   function gapCount(){
     let g=0;
     const skills={};
-    DATA.forEach(q=>{ (skills[q.domShort+"|"+q.skillShort] ||= []).push(q); });
+    DATA.forEach(q=>{ if(!submitted[q.domShort]) return; (skills[q.domShort+"|"+q.skillShort] ||= []).push(q); });
     Object.values(skills).forEach(sq=>{
       const ans=sq.filter(q=>answers[q.id]);
       if(!ans.length) return;
@@ -504,7 +540,7 @@
   $("#exitResults").addEventListener("click",()=>{ renderHome(); show("home"); window.scrollTo(0,0); });
   $("#resetBtn").addEventListener("click",()=>{
     if(confirm("Reset all answers and progress? This can't be undone.")){
-      answers={}; save(); renderHome();
+      answers={}; submitted={}; save(); saveSub(); renderHome();
     }
   });
 
